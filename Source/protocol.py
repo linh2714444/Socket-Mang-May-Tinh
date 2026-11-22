@@ -1,5 +1,5 @@
 """
-protocol.py - Phụ trách: Thành viên 1
+protocol.py - Phụ trách: Linh
 Định nghĩa giao thức tầng ứng dụng (Application-Layer Protocol) & cơ chế đóng khung dữ liệu (TCP Framing).
 
 1. Giao thức UDP (Discovery & Status):

@@ -1,5 +1,5 @@
 """
-state.py - Phụ trách: Thành viên 1
+state.py - Phụ trách: Linh
 Quản lý toàn bộ trạng thái dùng chung (Shared State) của ứng dụng P2P LAN Chat.
 Sử dụng threading.Lock() để đảm bảo tính toàn vẹn dữ liệu (Thread-Safety) khi nhiều
 luồng (Main UI, UDP Listener, Timeout Checker, TCP Receivers, File Senders) cùng truy cập.
