@@ -317,10 +317,13 @@ class TCPService:
                         self.ui.show_message(f"[*] Sending {filename} ... {next_milestone}%")
                         next_milestone += 25
 
-            done_msg = f"[*] Sent {filename} ({size_str}) to {partner} — 100% Done."
-            self.state.record_system_event(partner, done_msg)
-            self.ui.show_message(done_msg)
 
+            if sent_bytes == file_size:
+                done_msg = f"[*] Sent {filename} ({size_str}) to {partner} — 100% Done."
+                self.state.record_system_event(partner, done_msg)
+                self.ui.show_message(done_msg)
+            else:
+                self.ui.show_message(f"[!] File transfer cancelled ({filename} -> {partner}).")
         except (socket.timeout, ConnectionRefusedError, BrokenPipeError, OSError) as exc:
             self.ui.show_message(f"[!] File transfer failed ({filename} -> {partner}): {exc}")
         finally:
