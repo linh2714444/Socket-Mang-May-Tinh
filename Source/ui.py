@@ -77,7 +77,7 @@ class ConsoleUI:
         help_text = (
             "Available commands:\n"
             "  /list                 - Show online users\n"
-            "  /chat <name|number>   - Open chat with a peer\n"
+            "  /chat <name|number>          - Open chat with a peer\n"
             "  /send <filepath>      - Send file to current chat partner\n"
             "  /leave                - Close current chat\n"
             "  /status <online|away> - Change your status\n"
@@ -149,7 +149,7 @@ class ConsoleUI:
         elif cmd == "/send":
             partner = self.state.get_current_partner()
             if not partner:
-                self.show_message("[!] Select a chat partner first using /chat <name>.")
+                self.show_message("[!] Select a chat partner first using /chat <name|number>.")
                 return
 
             # Xóa dấu ngoặc kép nếu người dùng kéo thả file có dấu cách vào terminal
@@ -204,7 +204,7 @@ class ConsoleUI:
                             partner = self.state.get_current_partner()
                             if not partner:
                                 sys.stdout.write(
-                                    "[!] No active chat. Use /list and /chat <name>.\n"
+                                    "[!] No active chat. Use /list and /chat <name|number>.\n"
                                     + self._get_prompt()
                                 )
                                 sys.stdout.flush()
