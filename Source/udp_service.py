@@ -28,6 +28,7 @@ class UDPService:
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
         self._last_sent_status = None
+        self._broadcast_failed = False
 
         self.send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         self.recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -54,9 +55,13 @@ class UDPService:
         payload = encode_hello(name, tcp_port, status)
         try:
             self.send_sock.sendto(payload, (self.bcast_addr, self.udp_port))
+            if self._broadcast_failed:
+                self._broadcast_failed = False
+                self.ui.show_message("[*] UDP broadcast recovered.")
         except OSError as exc:
-            if not self._stop_event.is_set() and self.state.is_running():
-                self.ui.show_message(f"[!] UDP broadcast error: {exc}")
+            if not self._broadcast_failed and not self._stop_event.is_set() and self.state.is_running():
+                self._broadcast_failed = True
+                self.ui.show_message(f"[!] UDP broadcast error (network unavailable?): {exc}")
 
     def _is_own_packet(self, name: str, tcp_port: int) -> bool:
         my_name, my_tcp_port, _ = self.state.get_my_info()
