@@ -1,4 +1,5 @@
 import os
+import queue
 import socket
 import threading
 from typing import Dict, Optional, Tuple
@@ -14,7 +15,7 @@ from protocol import (
 )
 
 CHUNK_SIZE = 4096
-CONNECT_TIMEOUT = 5.0
+CONNECT_TIMEOUT = 2.0
 
 
 class TCPService:
@@ -29,6 +30,8 @@ class TCPService:
         self._stop_event = threading.Event()
         self.server_sock: Optional[socket.socket] = None
         self._acceptor_thread: Optional[threading.Thread] = None
+        self._sender_thread: Optional[threading.Thread] = None
+        self._outbox: "queue.Queue[Optional[Tuple[str, str, str]]]" = queue.Queue()
 
         # Quản lý kết nối chat đang mở: {peer_name: socket} và lock gửi riêng cho từng peer
         self._conn_lock = threading.Lock()
@@ -39,7 +42,7 @@ class TCPService:
     # 1. KHỞI ĐỘNG & TẮT PHÂN HỆ TCP (GỌI TỪ main.py)
     # =========================================================================
     def start(self) -> None:
-        """Mở TCP listening socket và khởi chạy luồng tcp_acceptor."""
+        """Mở TCP listening socket và khởi chạy luồng tcp_acceptor + tcp_sender."""
         _, my_tcp_port, _ = self.state.get_my_info()
 
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -52,11 +55,19 @@ class TCPService:
             target=self._acceptor_loop, name="tcp-acceptor", daemon=True
         )
         self._acceptor_thread.start()
+
+        self._sender_thread = threading.Thread(
+            target=self._sender_loop, name="tcp-sender", daemon=True
+        )
+        self._sender_thread.start()
+
         self.ui.show_message(f"[*] Listening on TCP port {my_tcp_port}")
 
     def shutdown(self) -> None:
         """Gửi BYE tới mọi peer đang kết nối và đóng toàn bộ socket an toàn."""
         self._stop_event.set()
+        self._outbox.put(None)
+
         my_name, _, _ = self.state.get_my_info()
         bye_frame = encode_bye_frame(my_name)
 
@@ -77,8 +88,9 @@ class TCPService:
             self._safe_close(self.server_sock)
             self.server_sock = None
 
-        if self._acceptor_thread and self._acceptor_thread.is_alive():
-            self._acceptor_thread.join(timeout=1.0)
+        for thread in (self._acceptor_thread, self._sender_thread):
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
 
     def _acceptor_loop(self) -> None:
         """Chờ kết nối TCP đến và tạo 1 luồng receiver riêng cho mỗi kết nối."""
@@ -96,6 +108,21 @@ class TCPService:
                 daemon=True,
             )
             worker.start()
+
+    def _sender_loop(self) -> None:
+        """Luồng gửi tin nhắn/BYE tuần tự để không làm đứng giao diện nhập liệu."""
+        while not self._stop_event.is_set() and self.state.is_running():
+            try:
+                item = self._outbox.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            action, partner, payload = item
+            if action == "MSG":
+                self._send_message_sync(partner, payload)
+            elif action == "BYE":
+                self._close_chat_sync(partner)
 
     # =========================================================================
     # 2. LUỒNG NHẬN DỮ LIỆU (TCP RECEIVER - 1 THREAD / CONNECTION)
@@ -140,7 +167,6 @@ class TCPService:
                         break
 
                     self._handle_receive_file(conn, sender, raw_filename, file_size)
-                    # Mỗi file dùng 1 kết nối TCP riêng -> nhận xong thoát vòng lặp để đóng socket
                     break
 
                 # --- NHÁNH 3: ĐỐI TÁC RỜI CHAT (BYE|<sender>\n) ---
@@ -189,7 +215,7 @@ class TCPService:
             self.ui.show_message("[*] Returned to main prompt.")
 
     # =========================================================================
-    # 3. NGHIỆP VỤ CHAT & ĐÓNG CHAT (GỌI TỪ ui.py)
+    # 3. NGHIỆP VỤ CHAT & ĐÓNG CHAT (GỌI TỪ ui.py VÀ udp_service.py)
     # =========================================================================
     def _ensure_chat_connection(
         self, partner: str
@@ -225,6 +251,13 @@ class TCPService:
         return self._get_chat_socket_and_lock(peer_name)
 
     def send_message(self, partner: str, text: str) -> bool:
+        """Đưa tin nhắn vào hàng đợi gửi nền để không làm đứng giao diện console."""
+        if self._stop_event.is_set() or not self.state.is_running():
+            return False
+        self._outbox.put(("MSG", partner, text))
+        return True
+
+    def _send_message_sync(self, partner: str, text: str) -> bool:
         """Đóng gói MSG frame và gửi tới đối tác đang chat."""
         sock, send_lock = self._ensure_chat_connection(partner)
         if not sock or not send_lock:
@@ -242,6 +275,11 @@ class TCPService:
             return False
 
     def close_chat(self, partner: str) -> None:
+        """Đưa lệnh đóng phiên chat vào hàng đợi để đảm bảo chạy sau các tin nhắn trước đó."""
+        if not self._stop_event.is_set() and self.state.is_running():
+            self._outbox.put(("BYE", partner, ""))
+
+    def _close_chat_sync(self, partner: str) -> None:
         """Gửi BYE frame và đóng kết nối TCP với partner (khi người dùng gõ /leave)."""
         sock, send_lock = self._get_chat_socket_and_lock(partner)
         if not sock or not send_lock:
@@ -255,6 +293,14 @@ class TCPService:
             pass
         finally:
             self._unregister_chat_socket(partner, sock)
+            self._safe_close(sock)
+
+    def drop_peer(self, peer_name: str) -> None:
+        """Chủ động đóng và xóa socket TCP cũ khi phân hệ UDP báo peer đã timeout."""
+        with self._conn_lock:
+            sock = self._chat_sockets.pop(peer_name, None)
+            self._send_locks.pop(peer_name, None)
+        if sock:
             self._safe_close(sock)
 
     # =========================================================================
@@ -316,7 +362,6 @@ class TCPService:
                     while next_milestone <= percent and next_milestone < 100:
                         self.ui.show_message(f"[*] Sending {filename} ... {next_milestone}%")
                         next_milestone += 25
-
 
             if sent_bytes == file_size:
                 done_msg = f"[*] Sent {filename} ({size_str}) to {partner} — 100% Done."
