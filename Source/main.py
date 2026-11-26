@@ -60,7 +60,13 @@ def main():
 
     try:
         from udp_service import UDPService
-        udp_service = UDPService(state, ui, udp_port=args.udp_port, bcast_addr=args.bcast)
+        udp_service = UDPService(
+            state,
+            ui,
+            udp_port=args.udp_port,
+            bcast_addr=args.bcast,
+            on_peer_timeout=tcp_service.drop_peer if tcp_service else None,
+        )
         udp_service.start()
     except ImportError:
         ui.show_message("[!] Warning: udp_service.py not found (running in UI-only mode).")
