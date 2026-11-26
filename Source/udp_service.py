@@ -1,7 +1,7 @@
 import socket
 import threading
 import time
-from typing import List
+from typing import Callable, List, Optional
 
 from protocol import decode_hello, encode_hello
 
@@ -17,6 +17,7 @@ class UDPService:
         bcast_addr: str = "255.255.255.255",
         broadcast_interval: float = 3.0,
         timeout_sec: float = 10.0,
+        on_peer_timeout: Optional[Callable[[str], None]] = None,
     ):
         self.state = state
         self.ui = ui
@@ -24,6 +25,7 @@ class UDPService:
         self.bcast_addr = bcast_addr
         self.broadcast_interval = broadcast_interval
         self.timeout_sec = timeout_sec
+        self.on_peer_timeout = on_peer_timeout
 
         self._stop_event = threading.Event()
         self._threads: List[threading.Thread] = []
@@ -35,6 +37,8 @@ class UDPService:
 
         try:
             self.send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            self.send_sock.bind(("", 0))
+            self._send_port = self.send_sock.getsockname()[1]
 
             self.recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             if hasattr(socket, "SO_REUSEPORT"):
@@ -50,6 +54,29 @@ class UDPService:
             self.recv_sock.close()
             raise
 
+    @staticmethod
+    def _get_local_ips() -> set:
+        ips = {"127.0.0.1", "0.0.0.0"}
+        try:
+            _, _, host_ips = socket.gethostbyname_ex(socket.gethostname())
+            ips.update(host_ips)
+        except OSError:
+            pass
+        probe = None
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("10.255.255.255", 1))
+            ips.add(probe.getsockname()[0])
+        except OSError:
+            pass
+        finally:
+            if probe:
+                try:
+                    probe.close()
+                except OSError:
+                    pass
+        return ips
+
     def _send_hello(self) -> None:
         name, tcp_port, status = self.state.get_my_info()
         payload = encode_hello(name, tcp_port, status)
@@ -63,9 +90,8 @@ class UDPService:
                 self._broadcast_failed = True
                 self.ui.show_message(f"[!] UDP broadcast error (network unavailable?): {exc}")
 
-    def _is_own_packet(self, name: str, tcp_port: int) -> bool:
-        my_name, my_tcp_port, _ = self.state.get_my_info()
-        return name == my_name and tcp_port == my_tcp_port
+    def _is_own_packet(self, sender_ip: str, sender_udp_port: int) -> bool:
+        return sender_udp_port == self._send_port and sender_ip in self._get_local_ips()
 
     def _broadcaster_loop(self) -> None:
         last_sent = 0.0
@@ -88,15 +114,15 @@ class UDPService:
             except OSError:
                 break
 
+            sender_ip, sender_udp_port = addr[0], addr[1]
+            if self._is_own_packet(sender_ip, sender_udp_port):
+                continue
+
             decoded = decode_hello(data)
             if not decoded:
                 continue
 
             peer_name, peer_tcp_port, peer_status = decoded
-            if self._is_own_packet(peer_name, peer_tcp_port):
-                continue
-
-            sender_ip = addr[0]
             is_new, status_changed = self.state.update_peer(
                 peer_name, sender_ip, peer_tcp_port, peer_status
             )
@@ -115,6 +141,8 @@ class UDPService:
 
             expired = self.state.remove_expired_peers(timeout_sec=self.timeout_sec)
             for peer_name, was_partner in expired:
+                if self.on_peer_timeout:
+                    self.on_peer_timeout(peer_name)
                 self.ui.show_message(f"[-] {peer_name} is offline (timeout).")
                 if was_partner:
                     self.ui.show_message(f"[!] Active chat closed because {peer_name} went offline.")
